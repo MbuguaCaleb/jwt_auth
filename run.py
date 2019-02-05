@@ -1,14 +1,16 @@
-from flask import Flask,request,jsonify
+from flask import Flask,request,jsonify,make_response
 from flask_sqlalchemy import SQLAlchemy
 import uuid
 from werkzeug.security import generate_password_hash,check_password_hash
+import jwt
+import datetime
+from functools import wraps
+
 
 
 app=Flask(__name__)
 app.config['SECRET_KEY']='this is secret'
 app.config['SQLALCHEMY_DATABASE_URI']='sqlite:///site.db'
-
-
 db = SQLAlchemy(app)
 
 
@@ -27,9 +29,39 @@ class Todo(db.Model):
     user_id = db.Column(db.Integer)
 
 
-@app.route('/user', methods=['GET'])
-def get_all_users():
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
 
+        token = None
+        """checking for access token"""
+
+        if 'x-access-token' in request.headers:
+            token = request.headers['x-access-token']
+
+        if not token:
+            return jsonify({'message':'Token is missing!'}), 401
+        
+        try:
+
+            data = jwt.decode(token,app.config['SECRET_KEY'])
+            current_user = User.query.filter_by(public_id=data['public_id']).first()
+        
+        except:
+            return jsonify({'message':'Token is invalid'}),401
+        
+        return f(current_user,*args,**kwargs)
+
+    return decorated
+
+
+@app.route('/user', methods=['GET'])
+@token_required
+def get_all_users(current_user):
+
+    if not current_user.admin:
+        return jsonify({'message':'Cannot perform that function!'})
+    
     users = User.query.all()
     output =[]
     for user in users:
@@ -44,7 +76,11 @@ def get_all_users():
 
 
 @app.route('/user/<public_id>',methods=['GET'])
-def get_one_user(public_id):
+@token_required
+def get_one_user(current_user,public_id):
+
+    if not current_user.admin:
+        return jsonify({'message':'Cannot perform that function!'})
     
     user = User.query.filter_by(public_id=public_id).first()
 
@@ -61,7 +97,12 @@ def get_one_user(public_id):
 
 
 @app.route('/user',methods=['POST'])
-def create_user():
+@token_required
+def create_user(current_user):
+
+    if not current_user.admin:
+        return jsonify({'message':'Cannot perform that function!'})
+
     data =request.get_json()
     hashed_password = generate_password_hash(data['password'],method='sha256')
     new_user = User(public_id=str(uuid.uuid4()), name=data['name'], password=hashed_password, admin=False)
@@ -71,7 +112,12 @@ def create_user():
 
 
 @app.route('/user/<public_id>',methods=['PUT'])
-def promote_user(public_id):
+@token_required
+def promote_user(current_user,public_id):
+
+    if not current_user.admin:
+        return jsonify({'message':'Cannot perform that function!'})
+
     user = User.query.filter_by(public_id=public_id).first()
 
     if not user:
@@ -85,7 +131,12 @@ def promote_user(public_id):
 
 
 @app.route('/user/<public_id>',methods=['DELETE'])
-def delete_user(public_id):
+@token_required
+def delete_user(current_user,public_id):
+
+    if not current_user.admin:
+        return jsonify({'message':'Cannot perform that function!'})
+
     user = User.query.filter_by(public_id=public_id).first()
 
     if not user:
@@ -97,6 +148,26 @@ def delete_user(public_id):
     return jsonify({'message':'User has been delted'})
 
 
+@app.route('/login',methods=['POST'])
+def login():
+    auth = request.authorization
+    
+    """if no authorization information has been provided"""
+
+    if not auth or not auth.username or not auth.password:
+        return make_response('Could not verify',401,{'WWW-Authenticate':'Basic realm="Login-required"'})
+
+    user = User.query.filter_by(name=auth.username).first()
+    
+    """if the user is not found"""
+
+    if not user:
+        return make_response('Could not verify',401,{'WWW-Authenticate':'Basic realm="Login-required"'})
+    
+    if check_password_hash(user.password,auth.password):
+        token = jwt.encode({'public_id':user.public_id, 'exp': datetime.datetime.utcnow() + datetime.timedelta(minutes=30)},app.config['SECRET_KEY'])
+        
+        return jsonify({'token': token.decode('UTF-8')})
 
 
 if __name__ =='__main__':
